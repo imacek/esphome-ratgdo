@@ -11,6 +11,7 @@ namespace esphome::ratgdo {
 namespace dry_contact {
 
     static const char* const TAG = "ratgdo_dry_contact";
+    static const char* const MOTION_WATCHDOG_TIMEOUT = "dc_motion_watchdog";
 
     void DryContact::setup(RATGDOComponent* ratgdo, Scheduler* scheduler, InternalGPIOPin* rx_pin, InternalGPIOPin* tx_pin)
     {
@@ -74,7 +75,34 @@ namespace dry_contact {
             }
         }
 
+        if (this->door_state_ == DoorState::OPENING || this->door_state_ == DoorState::CLOSING) {
+            this->arm_motion_watchdog_();
+        } else {
+            // travel confirmed or idle
+            this->ratgdo_->cancel_timeout(MOTION_WATCHDOG_TIMEOUT);
+        }
+
         this->ratgdo_->received(this->door_state_);
+    }
+
+    void DryContact::arm_motion_watchdog_()
+    {
+        float duration = this->door_state_ == DoorState::OPENING
+            ? *this->ratgdo_->opening_duration
+            : *this->ratgdo_->closing_duration;
+        if (duration <= 0) {
+            return; // travel durations not configured; watchdog disabled
+        }
+
+        // Re-arming replaces a pending timeout of the same name; confirmed or
+        // intentionally ended travel cancels it outright.
+        static constexpr uint32_t MOTION_WATCHDOG_MARGIN_MS = 3000;
+        uint32_t timeout_ms = static_cast<uint32_t>(duration * 1000) + MOTION_WATCHDOG_MARGIN_MS;
+        this->ratgdo_->set_timeout(MOTION_WATCHDOG_TIMEOUT, timeout_ms, [this] {
+            ESP_LOGW(TAG, "No limit switch reached within expected travel time; door state unknown");
+            this->door_state_ = DoorState::UNKNOWN;
+            this->ratgdo_->received(this->door_state_);
+        });
     }
 
     void DryContact::light_action(LightAction action)
@@ -117,24 +145,51 @@ namespace dry_contact {
 
         ESP_LOG1(TAG, "Door action: %s", LOG_STR_ARG(DoorAction_to_string(action)));
 
+        // OPEN/CLOSE go exclusively to the discrete pins — on gate operators
+        // with discrete command inputs (e.g. LiftMaster LA400UL expansion
+        // board) also pulsing SBC would send two conflicting commands at
+        // once. SBC serves TOGGLE and STOP. Discrete commands are
+        // direction-absolute and honored even mid-travel (the operator
+        // reverses immediately), but a reversal produces no limit switch
+        // event — report the commanded direction optimistically and let the
+        // limits (or the watchdog) settle the final state.
         if (action == DoorAction::OPEN && this->discrete_open_pin_ != nullptr) {
             this->discrete_open_pin_->digital_write(1);
             this->ratgdo_->set_timeout(500, [this] {
                 this->discrete_open_pin_->digital_write(0);
             });
-        }
-
-        if (action == DoorAction::CLOSE && this->discrete_close_pin_ != nullptr) {
+            if (this->door_state_ != DoorState::OPENING) {
+                this->door_state_ = DoorState::OPENING;
+                this->arm_motion_watchdog_();
+                this->ratgdo_->received(this->door_state_);
+            }
+        } else if (action == DoorAction::CLOSE && this->discrete_close_pin_ != nullptr) {
             this->discrete_close_pin_->digital_write(1);
             this->ratgdo_->set_timeout(500, [this] {
                 this->discrete_close_pin_->digital_write(0);
             });
-        }
+            if (this->door_state_ != DoorState::CLOSING) {
+                this->door_state_ = DoorState::CLOSING;
+                this->arm_motion_watchdog_();
+                this->ratgdo_->received(this->door_state_);
+            }
+        } else {
+            this->tx_pin_->digital_write(1); // Single button control
+            this->ratgdo_->set_timeout(500, [this] {
+                this->tx_pin_->digital_write(0);
+            });
 
-        this->tx_pin_->digital_write(1); // Single button control
-        this->ratgdo_->set_timeout(500, [this] {
-            this->tx_pin_->digital_write(0);
-        });
+            // SBC stops a moving operator (STOP explicitly, TOGGLE by cycle
+            // semantics). The limit switches cannot observe a mid-travel stop,
+            // but this one is self-issued — report STOPPED so the core freezes
+            // the position estimate at this instant instead of overrunning it.
+            if ((action == DoorAction::STOP || action == DoorAction::TOGGLE)
+                && (this->door_state_ == DoorState::OPENING || this->door_state_ == DoorState::CLOSING)) {
+                this->door_state_ = DoorState::STOPPED;
+                this->ratgdo_->cancel_timeout(MOTION_WATCHDOG_TIMEOUT); // travel intentionally ended
+                this->ratgdo_->received(this->door_state_);
+            }
+        }
     }
 
     Result DryContact::call(Args args)

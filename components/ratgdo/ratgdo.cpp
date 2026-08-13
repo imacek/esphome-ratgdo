@@ -385,6 +385,12 @@ void RATGDOComponent::set_resolved_door_state(const DoorState door_state)
 #ifdef RATGDO_USE_ENCODER
         enc_intended_dir_ = 0; // close intent satisfied
 #endif
+    } else if (door_state == DoorState::UNKNOWN) {
+        // Travel was not confirmed (e.g. dry contact watchdog) — freeze the
+        // position estimate where it is instead of letting the sync callbacks
+        // run it to the assumed end of travel.
+        this->door_position_update();
+        this->cancel_position_sync_callbacks();
     }
 
     if (door_state == DoorState::OPEN || door_state == DoorState::CLOSED || door_state == DoorState::STOPPED) {
@@ -820,6 +826,10 @@ void RATGDOComponent::door_open()
 #endif
     this->door_action(DoorAction::OPEN);
 
+#ifndef PROTOCOL_DRYCONTACT
+    // Dry contact limit switches are authoritative — never assume a final
+    // state on a timer; the protocol's travel-time watchdog reports UNKNOWN
+    // instead when travel is not confirmed.
     if (*this->opening_duration > 0) {
         // query state in case we don't get a status message
         this->set_timeout(
@@ -839,6 +849,7 @@ void RATGDOComponent::door_open()
                 }
             });
     }
+#endif
 }
 
 void RATGDOComponent::door_close()
@@ -859,6 +870,11 @@ void RATGDOComponent::door_close()
         return;
     }
 
+#ifndef PROTOCOL_DRYCONTACT
+    // Dry contact operators with discrete inputs (e.g. LA400UL) accept an
+    // opposing command mid-travel and reverse immediately, and the limit-switch
+    // state machine never reports STOPPED mid-travel — this stop-and-wait would
+    // deadlock the close command. Skip it for dry contact builds.
     if (*this->door_state == DoorState::OPENING) {
         // have to stop door first, otherwise close command is ignored
         this->door_action(DoorAction::STOP);
@@ -871,6 +887,7 @@ void RATGDOComponent::door_close()
         });
         return;
     }
+#endif
 
 #ifdef RATGDO_USE_ENCODER
     // Record intended direction so on_encoder_update can detect a wrong-way GDO response.
@@ -878,6 +895,14 @@ void RATGDOComponent::door_close()
     // of whether an obstruction sensor is present.
     enc_intended_dir_ = -1;
 #endif
+#ifdef PROTOCOL_DRYCONTACT
+    // Dry contact operators (gates, commercial openers) accept explicit CLOSE
+    // commands without a Chamberlain-style obstruction sensor — the
+    // obstruction-sensor gating below only applies to Security+ wireline
+    // openers. Send CLOSE unconditionally; the protocol layer still ignores it
+    // when the close limit is already reached.
+    this->door_action(DoorAction::CLOSE);
+#else
     if (this->flags_.obstruction_sensor_detected) {
         this->door_action(DoorAction::CLOSE);
     } else if (*this->door_state == DoorState::OPEN || *this->door_state == DoorState::STOPPED) {
@@ -888,7 +913,10 @@ void RATGDOComponent::door_close()
         ESP_LOGD(TAG, "No obstruction sensors detected. Close using TOGGLE.");
         this->door_action(DoorAction::TOGGLE);
     }
+#endif
 
+#ifndef PROTOCOL_DRYCONTACT
+    // See door_open(): dry contact builds never assume a final state on a timer.
     if (*this->closing_duration > 0) {
         // query state in case we don't get a status message
         this->set_timeout(
@@ -903,6 +931,7 @@ void RATGDOComponent::door_close()
                 }
             });
     }
+#endif
 }
 
 void RATGDOComponent::door_stop()

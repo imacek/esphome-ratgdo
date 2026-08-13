@@ -1,6 +1,12 @@
 
 # ratgdo for ESPHome
 
+> **Fork note:** this fork's dry contact protocol drives operators through
+> discrete open/close command inputs (LiftMaster LA400UL gate with expansion
+> board) instead of single-button cycling — see
+> [docs/dry_contact_la400.md](docs/dry_contact_la400.md). Not intended for
+> SBC-only openers.
+
 [ESPHome](https://esphome.io/) component for [ratgdo](https://ratcloud.llc) — a WiFi control board for garage door openers that works over your local network. Compatible with most residential Chamberlain and LiftMaster openers, with dry contact support for other brands.
 
 Purchase boards at [ratcloud.llc](https://ratcloud.llc).
