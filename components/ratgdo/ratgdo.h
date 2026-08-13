@@ -298,6 +298,7 @@ public:
     void sync();
 
     using Component::cancel_interval;
+    using Component::cancel_timeout;
     using Component::set_interval;
     using Component::set_timeout;
 

@@ -65,6 +65,12 @@ namespace dry_contact {
         InternalGPIOPin* rx_pin_;
         InternalGPIOPin* discrete_open_pin_ { nullptr };
         InternalGPIOPin* discrete_close_pin_ { nullptr };
+
+        // Travel-time watchdog: if a limit switch does not confirm the end of
+        // travel within the configured duration (+margin), stop claiming the
+        // door is moving and report UNKNOWN. Purely a state-display safeguard;
+        // it never issues commands.
+        void arm_motion_watchdog_();
         RATGDOComponent* ratgdo_;
         Scheduler* scheduler_;
 
